@@ -127,7 +127,20 @@ func (s *Server) handleConn(conn net.Conn) {
 			if bad {
 				continue
 			}
-			s.store.Set(key, value, ttl)
+			// 如果存在 PX 参数则按毫秒设置；否则按秒设置
+			pxMillis := int64(0)
+			for j := 2; j < len(args); j++ {
+				if strings.ToUpper(args[j]) == "PX" && j+1 < len(args) {
+					if ms, err := strconv.ParseInt(args[j+1], 10, 64); err == nil {
+						pxMillis = ms
+					}
+				}
+			}
+			if pxMillis > 0 {
+				s.store.SetWithMs(key, value, pxMillis)
+			} else {
+				s.store.Set(key, value, ttl)
+			}
 			conn.Write([]byte("+OK\r\n"))
 		case "GET":
 			if len(args) < 1 {
@@ -173,6 +186,30 @@ func (s *Server) handleConn(conn net.Conn) {
 			} else {
 				conn.Write([]byte(":0\r\n"))
 			}
+		case "PEXPIRE":
+			if len(args) < 2 {
+				conn.Write([]byte("-ERR wrong number of arguments for 'PEXPIRE' command\r\n"))
+				continue
+			}
+			key := args[0]
+			ms, err := strconv.ParseInt(args[1], 10, 64)
+			if err != nil {
+				conn.Write([]byte("-ERR invalid expire time\r\n"))
+				continue
+			}
+			if s.store.PExpire(key, ms) {
+				conn.Write([]byte(":1\r\n"))
+			} else {
+				conn.Write([]byte(":0\r\n"))
+			}
+		case "PTTL":
+			if len(args) < 1 {
+				conn.Write([]byte("-ERR wrong number of arguments for 'PTTL' command\r\n"))
+				continue
+			}
+			key := args[0]
+			pttl := s.store.PTTL(key)
+			conn.Write([]byte(fmt.Sprintf(":%d\r\n", pttl)))
 		case "TTL":
 			if len(args) < 1 {
 				conn.Write([]byte("-ERR wrong number of arguments for 'TTL' command\r\n"))

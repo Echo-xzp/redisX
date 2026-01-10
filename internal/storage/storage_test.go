@@ -69,3 +69,22 @@ func TestCountAndJanitor(t *testing.T) {
 		t.Fatalf("expected count 1 after janitor, got %d", n)
 	}
 }
+
+func TestPExpireAndPTTL(t *testing.T) {
+	s := NewStorage()
+	s.Set("kp", "vp", 0)
+	if !s.PExpire("kp", 500) {
+		t.Fatalf("expected PExpire to succeed")
+	}
+	pttl := s.PTTL("kp")
+	if pttl <= 0 || pttl > 500 {
+		t.Fatalf("expected pttl between 0 and 500, got %d", pttl)
+	}
+	time.Sleep(700 * time.Millisecond)
+	if _, ok := s.Get("kp"); ok {
+		t.Fatalf("expected kp expired")
+	}
+	if pttl := s.PTTL("kp"); pttl != -2 {
+		t.Fatalf("expected PTTL -2 for missing key, got %d", pttl)
+	}
+}

@@ -129,6 +129,23 @@ func TestSetWithPX(t *testing.T) {
 		t.Fatalf("expected +OK, got %q", line)
 	}
 
+	// 检查 PTTL 接口返回毫秒级剩余时间
+	if err := writeReq(conn, "PTTL", "kpx"); err != nil {
+		t.Fatalf("write pttl: %v", err)
+	}
+	line, _ = readLine(r)
+	if len(line) == 0 || line[0] != ':' {
+		t.Fatalf("expected integer reply for PTTL, got %q", line)
+	}
+	pttlStr := strings.TrimSpace(strings.TrimPrefix(line, ":"))
+	pttlVal, err := strconv.Atoi(pttlStr)
+	if err != nil {
+		t.Fatalf("invalid PTTL value: %v", err)
+	}
+	if pttlVal <= 0 || pttlVal > 500 {
+		t.Fatalf("expected pttl between 0 and 500, got %d", pttlVal)
+	}
+
 	if err := writeReq(conn, "GET", "kpx"); err != nil {
 		t.Fatalf("write get: %v", err)
 	}
@@ -145,6 +162,69 @@ func TestSetWithPX(t *testing.T) {
 	line, _ = readLine(r)
 	if line != "$-1\r\n" {
 		t.Fatalf("expected $-1, got %q", line)
+	}
+}
+
+func TestPExpireAndPTTL_Server(t *testing.T) {
+	s := startServer(t)
+	defer s.ln.Close()
+
+	conn, err := net.Dial("tcp", s.ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	r := bufio.NewReader(conn)
+
+	if err := writeReq(conn, "SET", "pp", "vp"); err != nil {
+		t.Fatalf("write set: %v", err)
+	}
+	_, _ = readLine(r)
+
+	if err := writeReq(conn, "PEXPIRE", "pp", "500"); err != nil {
+		t.Fatalf("write pexpire: %v", err)
+	}
+	line, _ := readLine(r)
+	if line != ":1\r\n" {
+		t.Fatalf("expected :1, got %q", line)
+	}
+
+	if err := writeReq(conn, "PTTL", "pp"); err != nil {
+		t.Fatalf("write pttl: %v", err)
+	}
+	line, _ = readLine(r)
+	pttlStr := strings.TrimSpace(strings.TrimPrefix(line, ":"))
+	pttlVal, err := strconv.Atoi(pttlStr)
+	if err != nil {
+		t.Fatalf("invalid PTTL value: %v", err)
+	}
+	if pttlVal <= 0 || pttlVal > 500 {
+		t.Fatalf("expected pttl between 0 and 500, got %d", pttlVal)
+	}
+
+	time.Sleep(700 * time.Millisecond)
+	if err := writeReq(conn, "GET", "pp"); err != nil {
+		t.Fatalf("write get: %v", err)
+	}
+	line, _ = readLine(r)
+	if line != "$-1\r\n" {
+		t.Fatalf("expected $-1, got %q", line)
+	}
+
+	// PTTL/TTL 应返回 -2
+	if err := writeReq(conn, "PTTL", "pp"); err != nil {
+		t.Fatalf("write pttl: %v", err)
+	}
+	line, _ = readLine(r)
+	if line != ":-2\r\n" {
+		t.Fatalf("expected :-2 for missing key, got %q", line)
+	}
+	if err := writeReq(conn, "TTL", "pp"); err != nil {
+		t.Fatalf("write ttl: %v", err)
+	}
+	line, _ = readLine(r)
+	if line != ":-2\r\n" {
+		t.Fatalf("expected :-2 for missing key TTL, got %q", line)
 	}
 }
 

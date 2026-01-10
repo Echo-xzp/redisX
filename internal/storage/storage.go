@@ -5,10 +5,10 @@ import (
 	"time"
 )
 
-// Entry 表示存储的值及过期时间（秒级）
+// Entry 表示存储的值及过期时间（Unix 毫秒）
 type Entry struct {
 	Value    string
-	ExpireAt int64 // Unix 时间戳，0 表示永不过期
+	ExpireAt int64 // Unix 毫秒时间戳，0 表示永不过期
 }
 
 type Storage struct {
@@ -20,28 +20,56 @@ func NewStorage() *Storage {
 	return &Storage{data: make(map[string]*Entry)}
 }
 
+// Get retrieves the value for the given key. If the key is expired it will be
+// removed and the function returns ("", false).
 func (s *Storage) Get(key string) (string, bool) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	v, ok := s.data[key]
 	if !ok {
+		s.mu.RUnlock()
 		return "", false
 	}
-	// 过期检查
-	if v.ExpireAt != 0 && time.Now().Unix() >= v.ExpireAt {
-		// 懒删除
-		go s.Delete(key)
+	// 过期检查（使用毫秒精度）
+	if v.ExpireAt != 0 && time.Now().UnixMilli() >= v.ExpireAt {
+		// 升级为写锁以删除已过期的键
+		s.mu.RUnlock()
+		s.mu.Lock()
+		if vv, ok2 := s.data[key]; ok2 {
+			if vv.ExpireAt != 0 && time.Now().UnixMilli() >= vv.ExpireAt {
+				delete(s.data, key)
+				s.mu.Unlock()
+				return "", false
+			}
+			val := vv.Value
+			s.mu.Unlock()
+			return val, true
+		}
+		s.mu.Unlock()
 		return "", false
 	}
-	return v.Value, true
+	val := v.Value
+	s.mu.RUnlock()
+	return val, true
 }
 
+// Set sets the value and ttl in seconds (0 means no expiration).
 func (s *Storage) Set(key, value string, ttlSeconds int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	exp := int64(0)
 	if ttlSeconds > 0 {
-		exp = time.Now().Unix() + ttlSeconds
+		exp = time.Now().UnixMilli() + ttlSeconds*1000
+	}
+	s.data[key] = &Entry{Value: value, ExpireAt: exp}
+}
+
+// SetWithMs sets the value and ttl in milliseconds (0 means no expiration).
+func (s *Storage) SetWithMs(key, value string, ttlMillis int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	exp := int64(0)
+	if ttlMillis > 0 {
+		exp = time.Now().UnixMilli() + ttlMillis
 	}
 	s.data[key] = &Entry{Value: value, ExpireAt: exp}
 }
@@ -63,13 +91,13 @@ func (s *Storage) Exists(key string) bool {
 	return ok
 }
 
-// Expire 为现有键设置过期时间，返回是否设置成功（键存在）
+// Expire sets TTL in seconds for an existing key.
 func (s *Storage) Expire(key string, ttlSeconds int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e, ok := s.data[key]; ok {
 		if ttlSeconds > 0 {
-			e.ExpireAt = time.Now().Unix() + ttlSeconds
+			e.ExpireAt = time.Now().UnixMilli() + ttlSeconds*1000
 		} else {
 			e.ExpireAt = 0
 		}
@@ -78,7 +106,22 @@ func (s *Storage) Expire(key string, ttlSeconds int64) bool {
 	return false
 }
 
-// TTL 返回剩余秒数：-2 表示键不存在，-1 表示键存在但无过期
+// PExpire sets TTL in milliseconds for an existing key.
+func (s *Storage) PExpire(key string, ttlMillis int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.data[key]; ok {
+		if ttlMillis > 0 {
+			e.ExpireAt = time.Now().UnixMilli() + ttlMillis
+		} else {
+			e.ExpireAt = 0
+		}
+		return true
+	}
+	return false
+}
+
+// TTL returns remaining seconds: -2 key not exist, -1 key exists but no expiry.
 func (s *Storage) TTL(key string) int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -86,7 +129,25 @@ func (s *Storage) TTL(key string) int64 {
 		if e.ExpireAt == 0 {
 			return -1
 		}
-		rem := e.ExpireAt - time.Now().Unix()
+		rem := e.ExpireAt - time.Now().UnixMilli()
+		if rem < 0 {
+			return -2
+		}
+		// 返回向上取整的秒数
+		return (rem + 999) / 1000
+	}
+	return -2
+}
+
+// PTTL 返回剩余毫秒数：-2 表示键不存在，-1 表示键存在但无过期
+func (s *Storage) PTTL(key string) int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if e, ok := s.data[key]; ok {
+		if e.ExpireAt == 0 {
+			return -1
+		}
+		rem := e.ExpireAt - time.Now().UnixMilli()
 		if rem < 0 {
 			return -2
 		}
@@ -102,13 +163,13 @@ func (s *Storage) Count() int {
 	return len(s.data)
 }
 
-// StartJanitor 启动后台清理过期键的 goroutine
+// StartJanitor 启动后台清理过期键的 goroutine（使用毫秒比较）
 func (s *Storage) StartJanitor(interval time.Duration) {
 	go func() {
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for range t.C {
-			now := time.Now().Unix()
+			now := time.Now().UnixMilli()
 			// 扫描并删除过期键
 			s.mu.Lock()
 			for k, v := range s.data {
