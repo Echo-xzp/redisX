@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"strconv"
 	"sync"
 	"time"
 )
@@ -80,6 +81,54 @@ func (s *Storage) Delete(key string) bool {
 	if _, ok := s.data[key]; ok {
 		delete(s.data, key)
 		return true
+	}
+	return false
+}
+
+// IncrBy atomically increments the integer value of a key by delta. If the key
+// does not exist it is set to delta. Returns the new value or an error if the
+// current value is not an integer.
+func (s *Storage) IncrBy(key string, delta int64) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var cur int64
+	if e, ok := s.data[key]; ok {
+		if e.ExpireAt != 0 && time.Now().UnixMilli() >= e.ExpireAt {
+			// expired
+			delete(s.data, key)
+			cur = 0
+		} else {
+			val := e.Value
+			if val == "" {
+				cur = 0
+			} else {
+				v, err := strconv.ParseInt(val, 10, 64)
+				if err != nil {
+					return 0, err
+				}
+				cur = v
+			}
+		}
+	}
+	cur += delta
+	if e, ok := s.data[key]; ok {
+		e.Value = strconv.FormatInt(cur, 10)
+	} else {
+		s.data[key] = &Entry{Value: strconv.FormatInt(cur, 10), ExpireAt: 0}
+	}
+	return cur, nil
+}
+
+// Persist removes the expiration from a key. Returns true if the timeout was removed.
+func (s *Storage) Persist(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.data[key]; ok {
+		if e.ExpireAt != 0 {
+			e.ExpireAt = 0
+			return true
+		}
+		return false
 	}
 	return false
 }

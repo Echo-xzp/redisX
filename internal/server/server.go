@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"redisx/internal/command"
 	"redisx/internal/protocol"
 	"redisx/internal/storage"
 )
@@ -21,6 +22,7 @@ type Server struct {
 	addr      string
 	ln        net.Listener
 	store     *storage.Storage
+	router    *command.Router
 	connCount uint64
 	startTime time.Time
 }
@@ -29,6 +31,12 @@ func NewServer(addr string) *Server {
 	s := &Server{addr: addr, store: storage.NewStorage(), startTime: time.Now()}
 	// 启动后台清理过期键
 	s.store.StartJanitor(time.Second * 1)
+	// 初始化命令路由并注册处理器
+	r := command.NewRouter()
+	r.Register("INCR", command.Incr)
+	r.Register("MGET", command.MGet)
+	r.Register("PERSIST", command.Persist)
+	s.router = r
 	return s
 }
 
@@ -67,6 +75,17 @@ func (s *Server) handleConn(conn net.Conn) {
 			// 协议错误，返回错误并关闭连接
 			conn.Write([]byte(fmt.Sprintf("-ERR %v\r\n", err)))
 			return
+		}
+		// 优先由路由处理可扩展命令
+		if s.router != nil {
+			if resp, handled, rerr := s.router.Handle(cmd, s.store, args); handled {
+				if rerr != nil {
+					conn.Write([]byte(fmt.Sprintf("-ERR %v\r\n", rerr)))
+				} else {
+					conn.Write(resp)
+				}
+				continue
+			}
 		}
 		switch strings.ToUpper(cmd) {
 		case "PING":
