@@ -30,6 +30,26 @@ func startServer(t *testing.T) *Server {
 	return nil
 }
 
+func startServerWithConfig(t *testing.T, maxConns int, connTimeout time.Duration, maxMemory int64) *Server {
+	s := NewServer(":0")
+	s.MaxConns = maxConns
+	s.ConnTimeout = connTimeout
+	s.MaxMemoryBytes = maxMemory
+	go func() {
+		if err := s.Start(); err != nil {
+			t.Fatalf("start server: %v", err)
+		}
+	}()
+	for i := 0; i < 50; i++ {
+		if s.ln != nil {
+			return s
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("server failed to start")
+	return nil
+}
+
 func writeReq(conn net.Conn, parts ...string) error {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "*%d\r\n", len(parts))
@@ -253,5 +273,55 @@ func TestInfoContainsKeys(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(info), []byte("keys:")) {
 		t.Fatalf("INFO output missing keys: %q", info)
+	}
+}
+
+func TestMaxConns(t *testing.T) {
+	s := startServerWithConfig(t, 1, 0, 0)
+	defer s.ln.Close()
+
+	c1, err := net.Dial("tcp", s.ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial c1: %v", err)
+	}
+	defer c1.Close()
+
+	c2, err := net.Dial("tcp", s.ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial c2: %v", err)
+	}
+	defer c2.Close()
+
+	r := bufio.NewReader(c2)
+	line, err := readLine(r)
+	if err != nil {
+		// connection may be closed immediately
+		return
+	}
+	if line != "-ERR max connections\r\n" {
+		t.Fatalf("expected max conn error, got %q", line)
+	}
+}
+
+func TestMaxMemory(t *testing.T) {
+	s := startServer(t)
+	defer s.ln.Close()
+	// 设置较小的内存上限
+	s.store.SetMaxMemory(10)
+
+	conn, err := net.Dial("tcp", s.ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	r := bufio.NewReader(conn)
+
+	// 发送一个超出限制的 SET
+	if err := writeReq(conn, "SET", "big", "0123456789ABC", "PX", "1000"); err != nil {
+		t.Fatalf("write set: %v", err)
+	}
+	line, _ := readLine(r)
+	if line != "-ERR max memory reached\r\n" {
+		t.Fatalf("expected max memory error, got %q", line)
 	}
 }

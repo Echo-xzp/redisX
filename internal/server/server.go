@@ -19,10 +19,16 @@ import (
 // Server 集成了存储与协议处理
 
 type Server struct {
-	addr      string
-	ln        net.Listener
-	store     *storage.Storage
-	router    *command.Router
+	addr   string
+	ln     net.Listener
+	store  *storage.Storage
+	router *command.Router
+	// connection/resource limits
+	MaxConns       int
+	connLimiter    chan struct{}
+	ConnTimeout    time.Duration
+	MaxMemoryBytes int64
+
 	connCount uint64
 	startTime time.Time
 }
@@ -46,6 +52,13 @@ func (s *Server) Start() error {
 		return err
 	}
 	s.ln = ln
+	// 初始化资源限制
+	if s.MaxConns > 0 {
+		s.connLimiter = make(chan struct{}, s.MaxConns)
+	}
+	if s.MaxMemoryBytes > 0 {
+		s.store.SetMaxMemory(s.MaxMemoryBytes)
+	}
 	log.Printf("redisx server listening on %s", s.addr)
 	for {
 		conn, err := ln.Accept()
@@ -57,19 +70,47 @@ func (s *Server) Start() error {
 			log.Println("accept error:", err)
 			continue
 		}
+		// 连接数限制：尝试非阻塞获取信号量
+		if s.MaxConns > 0 {
+			select {
+			case s.connLimiter <- struct{}{}:
+				// acquired
+			default:
+				// 拒绝新的连接
+				conn.Write([]byte("-ERR max connections\r\n"))
+				conn.Close()
+				continue
+			}
+		}
 		atomic.AddUint64(&s.connCount, 1)
-		go s.handleConn(conn)
+		go func(c net.Conn) {
+			defer func() {
+				atomic.AddUint64(&s.connCount, ^uint64(0))
+				if s.MaxConns > 0 {
+					<-s.connLimiter
+				}
+			}()
+			s.handleConn(c)
+		}(conn)
 	}
 }
 
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
-	defer atomic.AddUint64(&s.connCount, ^uint64(0))
 	reader := bufio.NewReader(conn)
 	for {
+		// 设置读写超时（如果配置了）
+		if s.ConnTimeout > 0 {
+			_ = conn.SetDeadline(time.Now().Add(s.ConnTimeout))
+		}
 		cmd, args, err := protocol.ParseRequest(reader)
 		if err != nil {
 			if err == protocol.ErrClosed {
+				return
+			}
+			// 如果是超时错误，给出明确消息
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				conn.Write([]byte("-ERR connection timeout\r\n"))
 				return
 			}
 			// 协议错误，返回错误并关闭连接
@@ -155,10 +196,25 @@ func (s *Server) handleConn(conn net.Conn) {
 					}
 				}
 			}
-			if pxMillis > 0 {
-				s.store.SetWithMs(key, value, pxMillis)
+			// 如果 storage 配置了 max memory 则使用 TrySet 系列以进行内存检查
+			if s.store.GetMaxMemory() > 0 {
+				if pxMillis > 0 {
+					if !s.store.TrySetWithMs(key, value, pxMillis) {
+						conn.Write([]byte("-ERR max memory reached\r\n"))
+						continue
+					}
+				} else {
+					if !s.store.TrySet(key, value, ttl) {
+						conn.Write([]byte("-ERR max memory reached\r\n"))
+						continue
+					}
+				}
 			} else {
-				s.store.Set(key, value, ttl)
+				if pxMillis > 0 {
+					s.store.SetWithMs(key, value, pxMillis)
+				} else {
+					s.store.Set(key, value, ttl)
+				}
 			}
 			conn.Write([]byte("+OK\r\n"))
 		case "GET":

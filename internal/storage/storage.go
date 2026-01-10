@@ -13,12 +13,35 @@ type Entry struct {
 }
 
 type Storage struct {
-	mu   sync.RWMutex
-	data map[string]*Entry
+	mu         sync.RWMutex
+	data       map[string]*Entry
+	maxMemory  int64 // bytes, 0 means no limit
+	totalBytes int64 // current total bytes used by values
 }
 
 func NewStorage() *Storage {
 	return &Storage{data: make(map[string]*Entry)}
+}
+
+// SetMaxMemory sets a soft memory limit in bytes (0 disables limit).
+func (s *Storage) SetMaxMemory(bytes int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maxMemory = bytes
+}
+
+// MemoryUsage returns the current approximate memory usage in bytes.
+func (s *Storage) MemoryUsage() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.totalBytes
+}
+
+// GetMaxMemory returns the configured max memory (0 means disabled).
+func (s *Storage) GetMaxMemory() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.maxMemory
 }
 
 // Get retrieves the value for the given key. If the key is expired it will be
@@ -61,6 +84,16 @@ func (s *Storage) Set(key, value string, ttlSeconds int64) {
 	if ttlSeconds > 0 {
 		exp = time.Now().UnixMilli() + ttlSeconds*1000
 	}
+	oldLen := 0
+	if e, ok := s.data[key]; ok {
+		// 如果旧值未过期，计算旧长度
+		if e.ExpireAt == 0 || time.Now().UnixMilli() < e.ExpireAt {
+			oldLen = len(e.Value)
+		}
+	}
+	delta := int64(len(value) - oldLen)
+	// 更新总字节数
+	s.totalBytes += delta
 	s.data[key] = &Entry{Value: value, ExpireAt: exp}
 }
 
@@ -72,13 +105,23 @@ func (s *Storage) SetWithMs(key, value string, ttlMillis int64) {
 	if ttlMillis > 0 {
 		exp = time.Now().UnixMilli() + ttlMillis
 	}
+	oldLen := 0
+	if e, ok := s.data[key]; ok {
+		if e.ExpireAt == 0 || time.Now().UnixMilli() < e.ExpireAt {
+			oldLen = len(e.Value)
+		}
+	}
+	delta := int64(len(value) - oldLen)
+	s.totalBytes += delta
 	s.data[key] = &Entry{Value: value, ExpireAt: exp}
 }
 
 func (s *Storage) Delete(key string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.data[key]; ok {
+	if e, ok := s.data[key]; ok {
+		// 调整内存计数
+		s.totalBytes -= int64(len(e.Value))
 		delete(s.data, key)
 		return true
 	}
@@ -92,13 +135,17 @@ func (s *Storage) IncrBy(key string, delta int64) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var cur int64
+	oldLen := 0
 	if e, ok := s.data[key]; ok {
 		if e.ExpireAt != 0 && time.Now().UnixMilli() >= e.ExpireAt {
 			// expired
+			// 调整内存计数
+			s.totalBytes -= int64(len(e.Value))
 			delete(s.data, key)
 			cur = 0
 		} else {
 			val := e.Value
+			oldLen = len(val)
 			if val == "" {
 				cur = 0
 			} else {
@@ -111,10 +158,13 @@ func (s *Storage) IncrBy(key string, delta int64) (int64, error) {
 		}
 	}
 	cur += delta
+	newVal := strconv.FormatInt(cur, 10)
+	// 更新总字节数
+	s.totalBytes += int64(len(newVal) - oldLen)
 	if e, ok := s.data[key]; ok {
-		e.Value = strconv.FormatInt(cur, 10)
+		e.Value = newVal
 	} else {
-		s.data[key] = &Entry{Value: strconv.FormatInt(cur, 10), ExpireAt: 0}
+		s.data[key] = &Entry{Value: newVal, ExpireAt: 0}
 	}
 	return cur, nil
 }
@@ -131,6 +181,53 @@ func (s *Storage) Persist(key string) bool {
 		return false
 	}
 	return false
+}
+
+// TrySet tries to set a key given seconds TTL, honoring maxMemory if set.
+// Returns true if set succeeded, false if rejected due to memory limit.
+func (s *Storage) TrySet(key, value string, ttlSeconds int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	exp := int64(0)
+	if ttlSeconds > 0 {
+		exp = time.Now().UnixMilli() + ttlSeconds*1000
+	}
+	oldLen := 0
+	if e, ok := s.data[key]; ok {
+		if e.ExpireAt == 0 || time.Now().UnixMilli() < e.ExpireAt {
+			oldLen = len(e.Value)
+		}
+	}
+	delta := int64(len(value) - oldLen)
+	if s.maxMemory > 0 && s.totalBytes+delta > s.maxMemory {
+		return false
+	}
+	s.totalBytes += delta
+	s.data[key] = &Entry{Value: value, ExpireAt: exp}
+	return true
+}
+
+// TrySetWithMs tries to set a key given ms TTL, honoring maxMemory if set.
+func (s *Storage) TrySetWithMs(key, value string, ttlMillis int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	exp := int64(0)
+	if ttlMillis > 0 {
+		exp = time.Now().UnixMilli() + ttlMillis
+	}
+	oldLen := 0
+	if e, ok := s.data[key]; ok {
+		if e.ExpireAt == 0 || time.Now().UnixMilli() < e.ExpireAt {
+			oldLen = len(e.Value)
+		}
+	}
+	delta := int64(len(value) - oldLen)
+	if s.maxMemory > 0 && s.totalBytes+delta > s.maxMemory {
+		return false
+	}
+	s.totalBytes += delta
+	s.data[key] = &Entry{Value: value, ExpireAt: exp}
+	return true
 }
 
 func (s *Storage) Exists(key string) bool {
@@ -223,6 +320,8 @@ func (s *Storage) StartJanitor(interval time.Duration) {
 			s.mu.Lock()
 			for k, v := range s.data {
 				if v.ExpireAt != 0 && now >= v.ExpireAt {
+					// 调整内存计数
+					s.totalBytes -= int64(len(v.Value))
 					delete(s.data, k)
 				}
 			}
