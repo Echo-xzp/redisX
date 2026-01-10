@@ -18,13 +18,13 @@ import (
 // Server 集成了存储与协议处理
 
 type Server struct {
-	addr          string
-	ln            net.Listener
-	store         *storage.Storage
+	addr  string
+	ln    net.Listener
+	store *storage.Storage
 	// connection/resource limits
-	MaxConns      int
-	connLimiter   chan struct{}
-	ConnTimeout   time.Duration
+	MaxConns       int
+	connLimiter    chan struct{}
+	ConnTimeout    time.Duration
 	MaxMemoryBytes int64
 
 	connCount uint64
