@@ -1,0 +1,58 @@
+name: Build and Draft Release on push to main
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # needed to create releases
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Determine release version and notes
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION=$(grep -m1 -Eo '^v[0-9]+\.[0-9]+\.[0-9]+' RELEASE.md || echo "v0.0.0")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          awk -v ver="$VERSION" '\n            BEGIN{found=0}\n            $0=="# redisX Release " ver {found=1; next}\n            /^# redisX Release / && found==1 {exit}\n            found==1 {print}\n          ' RELEASE.md > relnotes.txt || true
+          echo "release_notes<<EOF" >> $GITHUB_OUTPUT
+          cat relnotes.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Build binaries
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          echo "Building linux/amd64"
+          GOOS=linux GOARCH=amd64 go build -o release/redisx-linux-amd64 ./cmd/redisx
+          echo "Building linux/arm64"
+          GOOS=linux GOARCH=arm64 go build -o release/redisx-linux-arm64 ./cmd/redisx
+          echo "Building darwin/amd64"
+          GOOS=darwin GOARCH=amd64 go build -o release/redisx-darwin-amd64 ./cmd/redisx
+          echo "Building windows/amd64"
+          GOOS=windows GOARCH=amd64 go build -o release/redisx-windows-amd64.exe ./cmd/redisx
+          sha256sum release/* > release/SHA256SUMS
+
+      - name: Create or update GitHub Release (draft) and upload assets
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.version }}
+          body: ${{ steps.version.outputs.release_notes }}
+          draft: true
+          files: release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
