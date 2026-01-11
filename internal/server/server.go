@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"redisx/internal/command"
 	"redisx/internal/protocol"
 	"redisx/internal/storage"
 )
@@ -18,9 +19,10 @@ import (
 // Server 集成了存储与协议处理
 
 type Server struct {
-	addr  string
-	ln    net.Listener
-	store *storage.Storage
+	addr   string
+	ln     net.Listener
+	store  *storage.Storage
+	router *command.Router
 	// connection/resource limits
 	MaxConns       int
 	connLimiter    chan struct{}
@@ -35,6 +37,12 @@ func NewServer(addr string) *Server {
 	s := &Server{addr: addr, store: storage.NewStorage(), startTime: time.Now()}
 	// 启动后台清理过期键
 	s.store.StartJanitor(time.Second * 1)
+	// 初始化命令路由并注册处理器
+	r := command.NewRouter()
+	r.Register("INCR", command.Incr)
+	r.Register("MGET", command.MGet)
+	r.Register("PERSIST", command.Persist)
+	s.router = r
 	return s
 }
 
@@ -108,6 +116,17 @@ func (s *Server) handleConn(conn net.Conn) {
 			// 协议错误，返回错误并关闭连接
 			conn.Write([]byte(fmt.Sprintf("-ERR %v\r\n", err)))
 			return
+		}
+		// 优先由路由处理可扩展命令
+		if s.router != nil {
+			if resp, handled, rerr := s.router.Handle(cmd, s.store, args); handled {
+				if rerr != nil {
+					conn.Write([]byte(fmt.Sprintf("-ERR %v\r\n", rerr)))
+				} else {
+					conn.Write(resp)
+				}
+				continue
+			}
 		}
 		switch strings.ToUpper(cmd) {
 		case "PING":
@@ -242,6 +261,30 @@ func (s *Server) handleConn(conn net.Conn) {
 			} else {
 				conn.Write([]byte(":0\r\n"))
 			}
+		case "PEXPIRE":
+			if len(args) < 2 {
+				conn.Write([]byte("-ERR wrong number of arguments for 'PEXPIRE' command\r\n"))
+				continue
+			}
+			key := args[0]
+			ms, err := strconv.ParseInt(args[1], 10, 64)
+			if err != nil {
+				conn.Write([]byte("-ERR invalid expire time\r\n"))
+				continue
+			}
+			if s.store.PExpire(key, ms) {
+				conn.Write([]byte(":1\r\n"))
+			} else {
+				conn.Write([]byte(":0\r\n"))
+			}
+		case "PTTL":
+			if len(args) < 1 {
+				conn.Write([]byte("-ERR wrong number of arguments for 'PTTL' command\r\n"))
+				continue
+			}
+			key := args[0]
+			pttl := s.store.PTTL(key)
+			conn.Write([]byte(fmt.Sprintf(":%d\r\n", pttl)))
 		case "TTL":
 			if len(args) < 1 {
 				conn.Write([]byte("-ERR wrong number of arguments for 'TTL' command\r\n"))

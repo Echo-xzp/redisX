@@ -237,7 +237,7 @@ func (s *Storage) Exists(key string) bool {
 	return ok
 }
 
-// Expire 为现有键设置过期时间，返回是否设置成功（键存在）
+// Expire sets TTL in seconds for an existing key.
 func (s *Storage) Expire(key string, ttlSeconds int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -252,7 +252,22 @@ func (s *Storage) Expire(key string, ttlSeconds int64) bool {
 	return false
 }
 
-// TTL 返回剩余秒数：-2 表示键不存在，-1 表示键存在但无过期
+// PExpire sets TTL in milliseconds for an existing key.
+func (s *Storage) PExpire(key string, ttlMillis int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.data[key]; ok {
+		if ttlMillis > 0 {
+			e.ExpireAt = time.Now().UnixMilli() + ttlMillis
+		} else {
+			e.ExpireAt = 0
+		}
+		return true
+	}
+	return false
+}
+
+// TTL returns remaining seconds: -2 key not exist, -1 key exists but no expiry.
 func (s *Storage) TTL(key string) int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -260,11 +275,29 @@ func (s *Storage) TTL(key string) int64 {
 		if e.ExpireAt == 0 {
 			return -1
 		}
-		remMs := e.ExpireAt - time.Now().UnixMilli()
-		if remMs < 0 {
+		rem := e.ExpireAt - time.Now().UnixMilli()
+		if rem < 0 {
 			return -2
 		}
-		return remMs / 1000
+		// 返回向上取整的秒数
+		return (rem + 999) / 1000
+	}
+	return -2
+}
+
+// PTTL 返回剩余毫秒数：-2 表示键不存在，-1 表示键存在但无过期
+func (s *Storage) PTTL(key string) int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if e, ok := s.data[key]; ok {
+		if e.ExpireAt == 0 {
+			return -1
+		}
+		rem := e.ExpireAt - time.Now().UnixMilli()
+		if rem < 0 {
+			return -2
+		}
+		return rem
 	}
 	return -2
 }
@@ -276,7 +309,7 @@ func (s *Storage) Count() int {
 	return len(s.data)
 }
 
-// StartJanitor 启动后台清理过期键的 goroutine
+// StartJanitor 启动后台清理过期键的 goroutine（使用毫秒比较）
 func (s *Storage) StartJanitor(interval time.Duration) {
 	go func() {
 		t := time.NewTicker(interval)
