@@ -58,3 +58,36 @@ redis-cli -p 6379 INFO
 - 增加更多协议兼容性测试与更完整的命令支持。
 
 感谢使用与反馈！欢迎通过 issue/PR 贡献改进或报告 bug。
+
+---
+
+# redisX Release v0.2.0
+
+发布日期：2026-01-11
+
+简介
+
+这是 redisX 的第二版发布（v0.2.0），包含对过期精度、命令路由、资源限制等重要功能的增强与 bug 修复。
+
+重要改动/高亮
+
+- 毫秒级过期支持：新增 PEXPIRE / PTTL，并支持 `SET ... PX <ms>`（毫秒级 TTL）。
+- 命令路由与扩展：新增命令路由模块以及 INCR、MGET、PERSIST 的实现与测试。
+- 资源限制：在服务器层新增 MaxConns、ConnTimeout 与 MaxMemoryBytes，支持在内存限制下拒绝写入（`TrySet` 系列）。
+- RESP 与协议修复：增强 RESP 解析以支持 pipelining、null bulk 等边界情况，改进解析健壮性与测试覆盖。
+- 存储增强：统一使用 Unix 毫秒时间戳保存过期时间，增加内存使用计数、TrySet/TrySetWithMs、IncrBy 与后台 janitor 的一致性修复。
+- 测试：新增/修复大量单元测试与集成测试，当前本地测试通过。
+
+发布产物（建议在 CI/CD 中构建并上传）
+
+- redisx-darwin-amd64
+- redisx-linux-amd64
+- redisx-linux-arm64
+- redisx-windows-amd64.exe
+
+如何验证
+
+- 在本地运行 `go test ./...` 确认所有单元和集成测试通过。
+- 运行二进制并使用 `redis-cli` 验证 PEXPIRE/PTTL、SET PX、INCR、MGET、以及 MaxConns/MaxMemory 的行为。
+
+感谢贡献者与社区的反馈与审查。
