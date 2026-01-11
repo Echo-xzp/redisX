@@ -294,7 +294,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			ttl := s.store.TTL(key)
 			conn.Write([]byte(fmt.Sprintf(":%d\r\n", ttl)))
 		case "INFO":
-			info := fmt.Sprintf("# Server\r\nredis_version:redisX-0.1.0\r\nconnected_clients:%d\r\nkeys:%d\r\nuptime_in_seconds:%d\r\n", atomic.LoadUint64(&s.connCount), s.store.Count(), int(time.Since(s.startTime).Seconds()))
+			info := fmt.Sprintf("# Server\r\nredis_version:redisX-0.2.0\r\nconnected_clients:%d\r\nkeys:%d\r\nuptime_in_seconds:%d\r\n", atomic.LoadUint64(&s.connCount), s.store.Count(), int(time.Since(s.startTime).Seconds()))
 			conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(info), info)))
 		default:
 			conn.Write([]byte("-ERR unknown command\r\n"))
